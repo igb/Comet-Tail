@@ -1,0 +1,252 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+	<style type="text/css">
+	body {
+
+	font-family: arial;
+	font-size: 10pt;
+
+	}
+	td {
+
+	font-family: arial;
+	font-size: 10pt;
+	background: ffffff;
+	}
+
+
+	.footnote {
+
+	font-family: arial;
+	font-size: 7pt;
+
+	}
+
+	table {
+	background: black;
+
+	}
+
+	th {
+
+	background: ffffff;
+	font-family: arial;
+	font-size: 10pt;
+	font-weight: bold;
+
+	}
+	tt {
+
+	font-family: arial;
+	font-size: 8pt;
+
+	}
+	.footer {
+	    font-size: 10;
+	    font-weight: bold;
+
+	}
+	.feed {background: #eeeeff;}
+
+	.doc {
+	    border: 1px black dashed;
+	    padding: 3px;
+	    background: dddddd;
+	}
+	.command {
+	    font-style: italic;
+	}
+	pre {
+	    font-family: courier;
+	    font-size: 8pt;
+	    border-style: dashed;
+	    border-color: gray;
+	    border-width: 1px;
+	}
+
+	sup {
+	    font-size: 6pt;
+	}
+	</style>
+	<title>Comet Tail</title>
+</head>
+<body>
+	<h2>Comet Tail</h2>
+	<h3>Comet</h3>
+	<p><a href="http://en.wikipedia.org/wiki/Comet_(programming)">Comet</a> is a technique for HTTP content delivery that uses persistent connections between server and browser. <a href="http://www.w3.org/Protocols/rfc2616/rfc2616.html">HTTP 1.1</a> introduced a "chunked" transfer encoding, allowing data to be sent in "chunks" to the client over an extended period of time. Most modern web browsers will render or process each chunk of data as it is received, creating a stream of page items, executable scriptlets, or raw data.</p>
+	<h3>tail -f</h3>
+	<p>When invoked with the <a href="http://en.wikipedia.org/wiki/Tail_(Unix)#File_monitoring">"-f"</a> option, the unix command <a href="http://www.thelinuxblog.com/linux-man-pages/1/tail">tail</a> will continuously print newly added lines from  a given file to stdout. This is pretty handy when monitoring logs, debugging servers, tracking progress of a running application, etc. </p>
+<h3>"tailing" logs over HTTP using Comet</h3>
+<h4>Implementing tail -f in Erlang</h4>
+<p>First off, we are going to need a mechanism for "tailing" a given file. Handily, Erlang's <a href="http://ftp.sunet.se/pub/lang/erlang/doc/man/io.html">io</a> module provides a function for reading from a file, line by line...here is a simple set of functions that read a file from beginning to end, printing each line, and then blocking while waiting for further appendations to that file (and printing each newly appended line):
+	<pre>
+		
+ %% read a line from a file and print it...
+ %% ... if at end of file, try and try again until a new line appears
+		
+ tail(File) ->
+  case io:get_line(File, "") of
+   eof  -> tail(File);
+   Line ->	io:fwrite(Line),
+            tail(File)
+  end.
+
+  %% example:
+  %% {ok, MyFile}=file:open("/path/to/my/file", [read]).
+  %% tail(MyFile). 	
+		
+	</pre>
+	</p> 
+<h4>A Tiny Comet Server</h4>	
+<p>Erlang is a pretty handy language for writing networked IO-driven applications and it's support for TCP socket manipulation out of the box (using the OTP gen_tcp module),  make it pretty easy to hack together a tiny, specific-purpose webserver. Let's fire up <a href="">erl</a> and execute a few lines to create an HTTP server listening on a non-standard port (in this example, port <i>9999</i>):
+<pre>
+
+ <b>Erlang R13B02 (erts-5.7.3) [source] [smp:2:2] [rq:2] [async-threads:0] [kernel-poll:false]
+ Eshell V5.7.3  (abort with ^G)</b>
+
+ 1> {ok, ListenSock}=gen_tcp:listen(9999, [list,{active, false},{packet,http}]).
+ <i>{ok,#Port<0.455>}</i>
+ 2> {ok, Sock}=gen_tcp:accept(ListenSock).
+	
+</pre>
+<i>gen_tcp:accept/1</i> will block until an HTTP request is recieved...let's use <a href="">curl</a> or <a href="">wget</a> to initiate a request:
+<pre>
+
+ > curl -v http://127.0.0.1:9999
+ <i>* About to connect() to 127.0.0.1 port 9999 (#0)
+ *   Trying 127.0.0.1... connected
+ * Connected to 127.0.0.1 (127.0.0.1) port 9999 (#0)
+ > GET / HTTP/1.1
+ > User-Agent: curl/7.19.4 (universal-apple-darwin10.0) libcurl/7.19.4 OpenSSL/0.9.8l zlib/1.2.3
+ > Host: 127.0.0.1:9999
+ > Accept: */*
+ ></i> 
+
+</pre>
+<i>curl</i> will now be blocking, waiting on a response from the server...and if we switch back to our erl session, we will see that the <i>gen_tcp:accept/1</i> function has returned a socket for us to which we can write data. So what should we write? Well, first, let's inform the waiting client that we will be sending data using "chunking". We will send an HTTP 200 back to the client, but instead of providing <i>"Content-Length"</i>  header we will send back <i>"Transfer-Encoding: chunked"</i>. We won't close the connection, and we won't send any data right now.:
+<pre>
+
+ ...
+ 2> {ok, Sock}=gen_tcp:accept(ListenSock).	
+ <i>{ok,#Port<0.461>}</i>
+ 3> gen_tcp:send(Sock, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nCache-Control: no-cache\r\n<b>Transfer-Encoding: chunked</b>\r\n\r\n").
+ <i>ok</i>
+
+</pre>	 	
+<i>curl</i> will receive the sent headers, and keep the connection open, awaiting more data
+<pre>
+
+ <i>&lt; HTTP/1.1 200 OK
+ &lt; Content-Type: text/html; charset=UTF-8
+ &lt; Cache-Control: no-cache
+ &lt; Transfer-Encoding: chunked
+ &lt;</i> 
+
+</pre>
+Now, let's write a small function to send data to the client. For each "chunk" of data, we will need to calculate the size, in bytes, and send that number, hex-encoded, ahead of each chunk. The termination of the chunk is indicated by a carriage return: "\r\n".
+<pre>
+
+ 4>  SendChunk=fun(Sock, Data) -> Length=io_lib:format("~.16B", [length(Data)]),
+	gen_tcp:send(Sock, Length),
+	gen_tcp:send(Sock, "\r\n"),
+	gen_tcp:send(Sock, Data),
+	gen_tcp:send(Sock, "\r\n") 
+      end.
+ <i>#Fun&lt;erl_eval.12.113037538></i>
+ 5> SendChunk(Sock, "Hello Wordl!").
+ <i>ok</i>
+ 6> SendChunk(Sock, "Chunky Bacon! Chunky Bacon!").
+ <i>ok</i>
+ 7> SendChunk(Sock, "Hexapodia as the key insight").
+ <i>ok</i>
+
+</pre>
+Flipping back over to our <i>curl</i> session, we should see the chunks arriving:
+<pre>
+	
+ <i>C
+ Hello World!
+ 1B
+ Chunky Bacon! Chunky Bacon!
+ 1C
+ Hexapodia as the key insight</i>
+			
+</pre>
+Now let's see how a browser behaves with a chunked stream...open up Firefox or Google Chrome (don't try Safari or IE yet--we'll explain why later on in this post) and point it to http://127.0.0.1:9999/ . Switch back to our <i>erl</i> session so we can accept the browser's request, create a socket, and start writing chunks to the browser...
+<pre>
+
+ 8> {ok, BrowserSock}=gen_tcp:accept(ListenSock). 
+ <i>{ok,#Port<0.483>}</i>
+ 9>  gen_tcp:send(BrowserSock, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n\r\n").
+ <i>ok</i>
+ 10> SendChunk(BrowserSock, "&lt;head>&lt;body>").
+ <i>ok</i>	
+ 11> SendChunk(BrowserSock, "&lt;h1>One conversation centered on the ever accelerating progress of technology and changes...&lt;/h1>").	 
+ <i>ok</i>	
+ 12> SendChunk(SafariSock, "&lt;script language='JavaScript'>alert('8.68 days since Fall of Relay');&lt;/script>").
+ <i>ok</i>	
+
+</pre>	
+If you watch your browser window, you will see the page render the &lt;H1> text as it is sent/recieved, and then execute the subsequently sent scriptlet
+<div align="center"><br/><img align="center" src="comet-script-screen-sm.gif"/></div>
+</p>
+<h4>Putting it all together</h4>
+<p>
+Pretty cool, eh? Ok, let's go back and take a look at the tail function we created earlier...it's pretty obvious we can send each line to a socket instead of merely printing to standard out. Having covered the basic steps above,  I won't walk through the complete solution line by line, but you can download the source  <a href="comet_tail.erl"> here</a> ( <a href="comet_tail.erl">comet_tail.erl</a> ) and I'll walk though a usage example below. 
+</p>
+<p>Let's fire up <i>erl</i> and  compile the module, and start up a server on a given port (the first parameter of <i>comet_tail:start/2</i>). The second parameter is the directory prefix that will be prepended to file paths provided as request paramters:
+<pre>
+	
+ > erl -sname node1@localhost
+ <b>Erlang R13B02 (erts-5.7.3) [source] [smp:2:2] [rq:2] [async-threads:0] [kernel-poll:false]
+ Eshell V5.7.3  (abort with ^G)</b> 
+ <b>(node1@localhost)1></b> c(comet_tail).
+ {ok,comet_tail}
+ <b>(node1@localhost)2></b> comet_tail:start(9999, "/var/log/apache2/").
+
+</pre>
+Now there is a tail -f server running on <a rel="nofollow" href="http://www.hccp.org:9999/comet-tail?access_log">http://www.hccp.org:9999/comet-tail?access_log</a>
+<h3>Various and Sundry Hacks</h3>
+<h4>Scrolling</h4>
+<p>While the chunked stream will render, line by line in your browser, the default window behavior is to keep the view of a file positioned at the top, even as new content loads below the fold. To provide a tail-like scrolling experience, we will need to use a bit of HTML-hackery. One way to accomplish this scroll is to place the streaming content in an IFrame, and use JavaScript to constantly reposition the IFrame scroll to the end of the window. Here is the script that we use to manipulate the IFrame:
+<pre>
+	
+ function loop() { 
+	if(navigator.userAgent.indexOf('Safari') > 0) { 	
+		window.frames['logframe'].scrollBy(0 , 10000000); 
+	} else  { 
+		document.getElementById('logframe').contentWindow.scrollBy(0, 100000); 
+	} 
+	setTimeout('loop()', 1000); 
+ } 
+ loop(); 
+
+</pre>
+
+
+<p>
+<h4>IFrames and the JavaScript Security Model</h4>
+<p>Another pain point is that most browsers will not allow a parent window to access/manipulate DOM properties of a child IFrame (this is a good thing as it prevents phishing attacks that wrap legit windows and steal passwords, debit bank accounts and other nasty stuff). In order to scroll an internal frame, both the parent and the child IFrame <i>must</i> be served by the same host <i>and</i> port. Since I didn't want to have to proxy the Comet-tail server in order to provide a uniform endpoint to consumers of the parent and child IFrame, I decided to enhance the purpose-specific webserver to also serve up a static parent wrapper for the IFramed stream. 
+
+</p>	
+<h4>Buffering in Safari (and IE?)</h4>
+<p>Safari will not render content until a 1KB buffer has been filled. To get around this, we add a 1KB empty comment to each line we send.
+<pre>
+
+ %% generate a ~n kb comment for Safari and other lame-o browsers in order to force flush...
+ generate_comment_for_length([], Length) ->
+	generate_comment_for_length("&lt;!--", Length - 4);
+ generate_comment_for_length(Comment, 0) ->
+		lists:append(Comment, "-->");	
+ generate_comment_for_length(Comment, Length) ->
+	generate_comment_for_length(lists:append(Comment, " "), Length -1).
+	
+</pre>	
+</p>
+
+
+<p class="footer">
+3/18/2010</p>
+</body>
+</html> 
