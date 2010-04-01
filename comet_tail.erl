@@ -19,7 +19,7 @@ handle_request(Sock, LogDir) ->
 				err -> gen_tcp:send(Sock, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain; charset=UTF-8\r\nConnection: close\r\n\r\nInvalid File Path\r\n\r\n"),gen_tcp:close(Sock);
 				ok -> {ok, Device} = file:open(lists:append(LogDir,FilePath), [read]), 
 				gen_tcp:send(Sock, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n\r\n"),
-				tail_to_socket(Device, Sock)
+				tail_to_socket(Device, Sock, 1)
 			end;
 		{abs_path,"/comet-tail?"++FilePath} ->
 				HtmlFile=generate_iframe_wrapper(FilePath),
@@ -28,14 +28,15 @@ handle_request(Sock, LogDir) ->
 				gen_tcp:close(Sock)
 	end.
 
-tail_to_socket(Device, Sock) ->
+%% Backoff set so as to not throttle CPU when nothing left to read...1, 2, 4, 8, 16, 2, 4, 8, 16 second cycle...
+tail_to_socket(Device, Sock, Backoff) ->
 	case io:get_line(Device, "") of
-        eof  -> tail_to_socket(Device, Sock);
+        eof  -> timer:sleep(Backoff * 1000),NewBackoff=(Backoff * 2 rem 30),tail_to_socket(Device, Sock, NewBackoff);
         Line ->	HtmlLine=lists:append([generate_comment_for_length([], 1000), Line, "<br/>"]), 
 			Length=io_lib:format("~.16B", [length(HtmlLine)]),
 			gen_tcp:send(Sock, Length),gen_tcp:send(Sock, "\r\n"),
 			gen_tcp:send(Sock, HtmlLine),gen_tcp:send(Sock, "\r\n"), 
-			tail_to_socket(Device, Sock)
+			tail_to_socket(Device, Sock, 1)
 	end.
 	
 %% simple saftey check for relative directory parent references within path... 	
